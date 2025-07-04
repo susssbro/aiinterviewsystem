@@ -6,6 +6,7 @@ import os
 from pymongo import MongoClient
 from datetime import datetime
 from pydantic import BaseModel
+from datetime import datetime
 
 
 # MongoDB connection
@@ -17,6 +18,7 @@ class CallRequest(BaseModel):
     phone_number: str
     job_description: str
     job_resume: str
+    session_id:str
 
 
 
@@ -29,15 +31,14 @@ app = FastAPI()
 openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Remote endpoints
-REMOTE_PROFILE_API = "https://3417-121-244-51-34.ngrok-free.app/get-profile"  # Laptop A
-LAPTOP_C_RECEIVE_API = "https://3417-121-244-51-34.ngrok-free.app/receive-question"  # Laptop C (updated, no Twilio)
-LAPTOP_B_NGROK_URL =f"https://c69b-121-244-51-34.ngrok-free.app/call"
+SHASANK_API = "https://7406-2a09-bac5-3b25-1aa0-00-2a7-6e.ngrok-free.app"  # Laptop C (updated, no Twilio)
+ADITYA_API ="https://cfe0-125-22-170-178.ngrok-free.app"
 
 
 @app.get("/generate-remote-question")
 async def generate_remote_question(session_id: str = Query(...)):
     # Step 1: Fetch resume and job description from Laptop A
-    remote_url = f"{REMOTE_PROFILE_API}?session_id={session_id}"
+    remote_url = f"{SHASANK_API}/getprofile?session_id={session_id}"
     response = requests.get(remote_url)
 
     if response.status_code != 200:
@@ -78,7 +79,7 @@ First Question:"""
         "question": question
     }
 
-    forward_response = requests.post(LAPTOP_C_RECEIVE_API, json=payload)
+    forward_response = requests.post(f"{ADITYA_API}/recieve-question", json=payload)
 
     if forward_response.status_code != 200:
         return {
@@ -107,38 +108,52 @@ async def get_profile(session_id: str = Query(...)):
 @app.post("/initiate-call")
 def initiate_call_via_laptop_b(request: CallRequest):
     try:
-        # 1. Send request to Laptop B to initiate the call
-        response = requests.post(
-            LAPTOP_B_NGROK_URL,
-            json={"phone_number": request.phone_number}
-        )
-        response.raise_for_status()
+        # ✅ 1. Construct and log the payload
+        payload = {
+            "phone_number": request.phone_number,
+            "job_description": request.job_description,
+            "job_resume": request.job_resume
+        }
+        print("📤 Sending payload to Laptop B:", payload)
+
+        # ✅ 2. Send request to Laptop B to initiate the call
+        response = requests.post(f"{ADITYA_API}/call", json=payload)
+        response.raise_for_status()  # will raise an HTTPError for 4xx/5xx
+
+        # ✅ 3. Log and extract response
+        print("✅ Response from Laptop B:", response.text)
         data = response.json()
 
-        session_id = data.get("sid")
+        session_id = data.get("session_id")
         if not session_id:
-            return {"error": "SID not received from Laptop B"}
+            return {"error": "session_id not received from Laptop B"}
 
-        # 2. Store everything in MongoDB
+        # ✅ 4. Store everything in MongoDB
         collection.update_one(
-            {"session_id": session_id},
-            {
-                "$set": {
-                    "session_id": session_id,
-                    "phone_number": request.phone_number,
-                    "job_description": request.job_description,
-                    "job_resume": request.job_resume,
-                    "context": []
-                }
+    {"session_id": session_id},
+    {
+        "$set": {
+            "session_id": session_id,
+            "timestamp": datetime.utcnow().isoformat(),
+            "precontext": {
+                "job_resume": request.job_resume,
+                "job_description": request.job_description,
+                "phone_number": request.phone_number
             },
-            upsert=True
-        )
+            "context": [],
+            "summary": {}
+        }
+    },
+    upsert=True
+)
 
         return {
-            "message": "Call triggered via Laptop B and SID stored successfully.",
+            "message": "Call triggered via Laptop B and session stored successfully.",
             "session_id": session_id
         }
 
     except Exception as e:
-        return {"error":str(e)}
-
+        print("❌ Exception during call to Laptop B:", str(e))
+        if 'response' in locals():
+            print("📩 Response text from Laptop B:", response.text)
+        return {"error": str(e)}
